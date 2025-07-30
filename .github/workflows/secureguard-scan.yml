@@ -197,53 +197,83 @@ jobs:
         
         # Only send notification if webhook URL is set
         if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          # Parse scan results for detailed information
+          SECRET_DETAILS=""
+          
+          # Process GitLeaks findings
+          if [ -f "scan-results/capman-guest-spa_gitleaks.json" ] && [ -s "scan-results/capman-guest-spa_gitleaks.json" ]; then
+            echo "Processing GitLeaks findings..."
+            GITLEAKS_DETAILS=$(jq -r '.[] | "📄 *File:* `" + .File + ":" + (.StartLine | tostring) + "`\\n🔍 *Type:* " + .Description + " (High)\\n🛠️ *Scanner:* gitleaks\\n\\n"' scan-results/capman-guest-spa_gitleaks.json 2>/dev/null | head -n 20)
+            SECRET_DETAILS="${SECRET_DETAILS}${GITLEAKS_DETAILS}"
+          fi
+          
+          # Process detect-secrets findings
+          if [ -f "scan-results/capman-guest-spa_detect-secrets.json" ] && [ -s "scan-results/capman-guest-spa_detect-secrets.json" ]; then
+            echo "Processing detect-secrets findings..."
+            DS_DETAILS=$(jq -r '.results | to_entries[] | .key as $file | .value[] | "📄 *File:* `" + $file + ":" + (.line_number | tostring) + "`\\n🔍 *Type:* " + .type + " (Medium)\\n🛠️ *Scanner:* detect-secrets\\n\\n"' scan-results/capman-guest-spa_detect-secrets.json 2>/dev/null | head -n 20)
+            SECRET_DETAILS="${SECRET_DETAILS}${DS_DETAILS}"
+          fi
+          
           # Determine message based on results
           if [ "$TOTAL" -eq 0 ]; then
             STATUS="✅ Clean"
             COLOR="good"
-            MESSAGE="No secrets detected in capman-guest-spa fork"
+            MESSAGE="No secrets detected in TEST-capman-guest-spa"
+            NOTIFICATION_TEXT="Repository scan completed successfully with no security issues found."
           else
             STATUS="🚨 Secrets Found"
             COLOR="danger"
-            MESSAGE="$TOTAL potential secrets detected in capman-guest-spa fork"
+            MESSAGE="$TOTAL potential secrets detected in TEST-capman-guest-spa"
+            if [ -n "$SECRET_DETAILS" ]; then
+              NOTIFICATION_TEXT="*Secret Details:*\\n\\n${SECRET_DETAILS}"
+            else
+              NOTIFICATION_TEXT="$TOTAL secrets detected. Check the workflow artifacts for details."
+            fi
           fi
           
-          # Send to Slack
-          curl -X POST $SLACK_WEBHOOK_URL \
+          # Send detailed notification to Slack (using the same format as the working example)
+          curl -X POST "$SLACK_WEBHOOK_URL" \
             -H 'Content-Type: application/json' \
             -d '{
+              "text": "'"$STATUS"': SecureGuard Scan",
+              "username": "SecureGuard",
+              "icon_emoji": ":shield:",
               "attachments": [
                 {
                   "color": "'"$COLOR"'",
-                  "blocks": [
+                  "fields": [
                     {
-                      "type": "header",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "'"$STATUS"': SecureGuard Scan"
-                      }
+                      "title": "Repository",
+                      "value": "'"$REPO"'",
+                      "short": true
                     },
                     {
-                      "type": "section",
-                      "text": {
-                        "type": "mrkdwn",
-                        "text": "*Repository:* `'"$REPO"'`\n*Event:* '"$EVENT"'\n*Triggered by:* '"$ACTOR"'\n*Result:* '"$MESSAGE"'"
-                      }
+                      "title": "Event",
+                      "value": "'"$EVENT"'",
+                      "short": true
                     },
                     {
-                      "type": "actions",
-                      "elements": [
-                        {
-                          "type": "button",
-                          "text": {
-                            "type": "plain_text",
-                            "text": "View Details"
-                          },
-                          "url": "'"$RUN_URL"'"
-                        }
-                      ]
+                      "title": "Triggered by",
+                      "value": "'"$ACTOR"'",
+                      "short": true
+                    },
+                    {
+                      "title": "Secrets Found",
+                      "value": "'"$TOTAL"'",
+                      "short": true
                     }
-                  ]
+                  ],
+                  "text": "'"$NOTIFICATION_TEXT"'",
+                  "actions": [
+                    {
+                      "type": "button",
+                      "text": "View on GitHub",
+                      "url": "'"$RUN_URL"'",
+                      "style": "primary"
+                    }
+                  ],
+                  "footer": "SecureGuard Security Scanner",
+                  "ts": '$(date +%s)'
                 }
               ]
             }' || echo "Slack notification failed, but continuing workflow"
