@@ -1,0 +1,261 @@
+# SecureGuard Security Scan for Personal Fork
+# Repository: davidmaduike-toast/TEST-capman-guest-spa
+# 
+# This workflow scans the repository for secrets and sends notifications to Slack
+
+name: SecureGuard Security Scan
+
+on:
+  # Scan on every push to main branch
+  push:
+    branches: [ main, master ]
+  
+  # Scan on pull requests
+  pull_request:
+    branches: [ main, master ]
+  
+  # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: 'Scan mode'
+        required: true
+        default: 'current-repo'
+        type: choice
+        options:
+          - current-repo      # Scan just this repository
+      depth:
+        description: 'Commit history depth (0 for full history)'
+        required: false
+        default: '50'
+
+permissions:
+  contents: read
+  security-events: write  # For GitHub Advanced Security
+  issues: write          # To create issues for findings
+  pull-requests: write   # To comment on PRs
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: ${{ github.event.inputs.depth || 50 }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+    
+    - name: Install security tools
+      run: |
+        # Install Python packages
+        pip install detect-secrets
+        
+        # Install GitLeaks
+        mkdir -p $HOME/.local/bin
+        GITLEAKS_VERSION="8.18.0"
+        wget -q -O - "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | \
+          tar -xz -C $HOME/.local/bin
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+    
+    - name: Run security scan
+      id: scan
+      run: |
+        # Initialize results
+        TOTAL_SECRETS=0
+        
+        # Create results directory
+        mkdir -p scan-results
+        
+        echo "Scanning davidmaduike-toast/TEST-capman-guest-spa repository..."
+        
+        # Run GitLeaks
+        gitleaks detect \
+          --source "." \
+          --report-format json \
+          --report-path "scan-results/capman-guest-spa_gitleaks.json" \
+          --no-banner || true
+        
+        # Run detect-secrets
+        detect-secrets scan . --all-files > "scan-results/capman-guest-spa_detect-secrets.json" || true
+        
+        # Count secrets from GitLeaks
+        if [ -f "scan-results/capman-guest-spa_gitleaks.json" ]; then
+          GITLEAKS_COUNT=$(jq 'length' "scan-results/capman-guest-spa_gitleaks.json" 2>/dev/null || echo 0)
+          TOTAL_SECRETS=$((TOTAL_SECRETS + GITLEAKS_COUNT))
+          echo "GitLeaks found $GITLEAKS_COUNT secrets"
+        fi
+        
+        # Count secrets from detect-secrets
+        if [ -f "scan-results/capman-guest-spa_detect-secrets.json" ]; then
+          DETECT_SECRETS_COUNT=$(jq '.results | length' "scan-results/capman-guest-spa_detect-secrets.json" 2>/dev/null || echo 0)
+          echo "detect-secrets found $DETECT_SECRETS_COUNT potential secrets"
+        fi
+        
+        echo "Total secrets found: $TOTAL_SECRETS"
+        echo "total_secrets=$TOTAL_SECRETS" >> $GITHUB_OUTPUT
+        
+        # Create summary report
+        cat > scan-results/summary.json << EOF
+        {
+          "scan_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "repository": "davidmaduike-toast/TEST-capman-guest-spa",
+          "total_secrets": $TOTAL_SECRETS,
+          "gitleaks_count": $GITLEAKS_COUNT,
+          "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        }
+        EOF
+    
+    - name: Upload scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-scan-results-${{ github.run_id }}
+        path: scan-results/
+        retention-days: 90
+    
+    - name: Create scan summary
+      if: always()
+      run: |
+        echo "## 🔍 SecureGuard Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository**: davidmaduike-toast/TEST-capman-guest-spa" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f scan-results/summary.json ]; then
+          TOTAL=$(jq -r '.total_secrets' scan-results/summary.json)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "✅ **No secrets detected!** Repository appears clean." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🚨 **$TOTAL potential secrets detected!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Required Actions:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review the scan results in the artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "2. Remove any real secrets from the code" >> $GITHUB_STEP_SUMMARY
+            echo "3. Rotate any exposed credentials immediately" >> $GITHUB_STEP_SUMMARY
+            echo "4. Use environment variables or secret management systems" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "[View detailed results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Comment on PR
+      if: |
+        github.event_name == 'pull_request' && 
+        steps.scan.outputs.total_secrets != '0'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const secrets_count = '${{ steps.scan.outputs.total_secrets }}';
+          
+          const comment = `## 🔍 SecureGuard Security Scan Results
+          
+          🚨 **${secrets_count} potential secrets detected in this PR!**
+          
+          ### Required Actions:
+          1. Review the [scan results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          2. Remove any real secrets from your code
+          3. **Rotate any exposed credentials immediately**
+          4. If these are false positives, add them to \`.gitleaksignore\`
+          
+          ### Prevention Tips:
+          - Never commit credentials, API keys, or tokens
+          - Use environment variables for sensitive data
+          - Add sensitive files to \`.gitignore\`
+          
+          <details>
+          <summary>📚 Learn more about secret management</summary>
+          
+          - [GitHub Secrets Documentation](https://docs.github.com/en/actions/security-guides/encrypted-secrets)
+          - [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
+          
+          </details>`;
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+    
+    - name: Send Slack notification
+      if: always()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        TOTAL="${{ steps.scan.outputs.total_secrets || 0 }}"
+        REPO="davidmaduike-toast/TEST-capman-guest-spa"
+        RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        ACTOR="${{ github.actor }}"
+        EVENT="${{ github.event_name }}"
+        
+        # Only send notification if webhook URL is set
+        if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          # Determine message based on results
+          if [ "$TOTAL" -eq 0 ]; then
+            STATUS="✅ Clean"
+            COLOR="good"
+            MESSAGE="No secrets detected in capman-guest-spa fork"
+          else
+            STATUS="🚨 Secrets Found"
+            COLOR="danger"
+            MESSAGE="$TOTAL potential secrets detected in capman-guest-spa fork"
+          fi
+          
+          # Send to Slack
+          curl -X POST $SLACK_WEBHOOK_URL \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [
+                {
+                  "color": "'"$COLOR"'",
+                  "blocks": [
+                    {
+                      "type": "header",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "'"$STATUS"': SecureGuard Scan"
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "*Repository:* `'"$REPO"'`\n*Event:* '"$EVENT"'\n*Triggered by:* '"$ACTOR"'\n*Result:* '"$MESSAGE"'"
+                      }
+                    },
+                    {
+                      "type": "actions",
+                      "elements": [
+                        {
+                          "type": "button",
+                          "text": {
+                            "type": "plain_text",
+                            "text": "View Details"
+                          },
+                          "url": "'"$RUN_URL"'"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }' || echo "Slack notification failed, but continuing workflow"
+        else
+          echo "No Slack webhook URL configured, skipping notification"
+        fi
+    
+    - name: Fail if secrets found (for PR checks)
+      if: |
+        github.event_name == 'pull_request' && 
+        steps.scan.outputs.total_secrets != '0'
+      run: |
+        TOTAL="${{ steps.scan.outputs.total_secrets }}"
+        echo "::error::$TOTAL secrets detected. Please remove them before merging."
+        exit 1 
