@@ -1,0 +1,16 @@
+{
+  "name": "capman-guest-spa",
+  "version": "1.0.0",
+  "description": "Guest application for table reservations",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test"
+  },
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "axios": "^1.0.0"
+  }
+}
