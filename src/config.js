@@ -7,6 +7,8 @@ export const config = {
   databaseUrl: 'postgresql://user:password123@localhost:5432/guestapp',
   apiKey: 'sk_test_4eC39HqLyjWDarjtT1zdp7dc',
   awsAccessKey: 'AKIAIOSFODNN7EXAMPLE',
+  githubToken: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+  slackWebhook: 'https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX',
   
   features: {
     enableReservations: true,
